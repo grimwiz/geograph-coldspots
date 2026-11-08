@@ -1,0 +1,1147 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>Geograph cold spots</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Geograph cold spots — find which of your photographs fill gaps on Geograph, write their text, submit.
+  Runs entirely in Chrome/Edge from a local file. Keep the lib/ folder beside this file.
+  Never writes to the photo folder: state lives in this browser (and can be saved to a file).
+  Libraries: exifr (MIT), proj4js (MIT), geotiff.js (MIT); OSTN15 grid © Ordnance Survey (open licence).
+-->
+<script src="lib/exifr.full.umd.js"></script>
+<script src="lib/proj4.js"></script>
+<script src="lib/geotiff.js"></script>
+<script src="lib/ostn15-grid.js"></script>
+<script src="lib/subjects.js"></script>
+<script src="lib/leaflet/leaflet.js"></script>
+<link rel="stylesheet" href="lib/leaflet/leaflet.css">
+<style>
+  :root { --bg:#f6f5f1; --card:#fff; --ink:#1d1d1b; --muted:#6b6a64; --line:#dddbd3; --accent:#2f6b3a;
+          --warn:#a35c00; --bad:#a3262a; --empty:#2f6b3a; --few:#7a8a1f; --busy:#8a8a85; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+  header { position:sticky; top:0; z-index:5; background:var(--bg); border-bottom:1px solid var(--line);
+           padding:10px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0 12px 0 0; }
+  button, select, input, textarea { font:inherit; }
+  button { border:1px solid var(--line); background:#fff; border-radius:6px; padding:5px 11px; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { color:var(--muted); margin-left:auto; font-size:13px; }
+  main { padding:16px; display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:16px; }
+  .intro { grid-column:1/-1; max-width:760px; color:var(--muted); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; }
+  .card.decided { opacity:.55; }
+  .pic { position:relative; background:#222; aspect-ratio:4/3; }
+  .pic img { width:100%; height:100%; object-fit:contain; display:block; }
+  .arrow { position:absolute; right:10px; top:10px; width:38px; height:38px; background:rgba(255,255,255,.85); border-radius:50%; }
+  .body { padding:10px 12px 12px; display:flex; flex-direction:column; gap:8px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .badge { font-size:12px; padding:2px 7px; border-radius:10px; background:#eeede8; color:var(--ink); white-space:nowrap; }
+  .badge.empty { background:var(--empty); color:#fff; } .badge.few { background:var(--few); color:#fff; }
+  .badge.busy { background:var(--busy); color:#fff; } .badge.warn { background:#f6e3c6; color:var(--warn); }
+  .badge.bad { background:#f3d3d3; color:var(--bad); }
+  .ref { font-family:ui-monospace, Consolas, monospace; font-size:13px; }
+  .file { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .near { display:flex; gap:4px; overflow-x:auto; }
+  .near a img { width:60px; height:60px; object-fit:cover; border-radius:4px; display:block; }
+  label { font-size:12px; color:var(--muted); display:block; }
+  .card input[type=text], .card textarea { width:100%; border:1px solid var(--line); border-radius:5px; padding:4px 6px; }
+  .card textarea { min-height:64px; resize:vertical; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .grid3 { display:grid; grid-template-columns:1fr 1fr 80px; gap:6px; }
+  .note { font-size:12px; color:var(--muted); white-space:pre-wrap; }
+  .note.bad { color:var(--bad); } .note.ok { color:var(--accent); }
+  dialog { border:1px solid var(--line); border-radius:10px; max-width:640px; width:92vw; }
+  dialog h2 { margin:0 0 6px; font-size:16px; } dialog h3 { margin:14px 0 4px; font-size:14px; }
+  dialog input { width:100%; border:1px solid var(--line); border-radius:5px; padding:4px 6px; margin-bottom:6px; }
+  dialog .presets button { font-size:12px; padding:2px 8px; margin:0 4px 4px 0; }
+  #map { height:62vh; border-radius:6px; }
+  #log { grid-column:1/-1; font-size:12px; color:var(--muted); white-space:pre-wrap; max-height:120px; overflow:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Geograph cold spots</h1>
+  <button id="openDir" class="primary">Open photo folder</button>
+  <label style="display:inline"><input type="file" id="dirInput" webkitdirectory multiple hidden></label>
+  <select id="filter" title="Which photographs to show">
+    <option value="empty">Empty 100 m squares</option>
+    <option value="few">Up to 4 Geograph photos</option>
+    <option value="all">All located photos</option>
+    <option value="excluded">Excluded (bad GPS, outside area)</option>
+  </select>
+  <select id="device" title="Only photographs from this camera or phone"><option value="">All devices</option></select>
+  <select id="sort" title="Order of the cards">
+    <option value="empty">Emptiest squares first</option>
+    <option value="time">Time taken</option>
+    <option value="name">File name</option>
+  </select>
+  <label style="display:inline;color:inherit;font-size:13px"><input type="checkbox" id="hideDecided" checked> hide done</label>
+  <input id="find" type="search" placeholder="Find a photo (file name, text, grid ref)" style="width:230px;border:1px solid var(--line);border-radius:6px;padding:4px 8px">
+  <button id="describeAll" title="Ask the vision model to write text for every shown photo that has none">Write text for shown</button>
+  <button id="saveState" title="Save decisions and text to a file of your choice">Save state…</button>
+  <button id="loadState" title="Load a saved state file">Load state…</button>
+  <button id="openSettings">Settings</button>
+  <span id="recent" style="font-size:13px"></span>
+  <span id="status">Choose a folder to start.</span>
+  <button id="retry" hidden>Retry Geograph</button>
+</header>
+<main id="cards">
+  <div class="intro">
+    <p><b>What this does.</b> Reads the GPS position in each photograph, works out its 100 m Ordnance Survey (or Irish Grid) square,
+    asks Geograph how many pictures already exist there, and shows the emptiest first. For a photograph you want to contribute it can
+    ask a vision model to draft a title and description, then submit it to Geograph.</p>
+    <p>Nothing is written to the photo folder. Your decisions are kept in this browser; use “Save state…” to keep a copy elsewhere.
+    Set up the vision model and your Geograph upload token under <b>Settings</b> first.</p>
+  </div>
+  <div id="log"></div>
+</main>
+
+<dialog id="mapDlg" style="max-width:960px">
+  <h2>Where is the subject?</h2>
+  <p class="note">Geograph files a picture under the square of what it shows. Blue ring: camera (line: the direction it faced, where the phone recorded it). Pin: subject —
+    click the map or drag the pin, or click a green Geograph picture or an orange OpenStreetMap feature to use its position. The red box is the subject's 100 m square.</p>
+  <div class="row" style="margin-bottom:6px">
+    <input id="mapPaste" style="flex:1;border:1px solid var(--line);border-radius:5px;padding:4px 6px" placeholder="Paste a Google Maps link, coordinates (55.6185, -1.6560) or a grid reference">
+    <button type="button" id="mapGo">Go</button>
+  </div>
+  <div id="map"></div>
+  <div class="row" style="margin-top:8px">
+    <span id="mapRef" class="ref"></span><span style="flex:1"></span>
+    <button type="button" id="mapNone" title="Wide views with no single subject: Geograph gets only the 4-figure square">No subject (wide view)</button>
+    <button type="button" id="mapCamera" title="For close-ups, and views with foreground detail">Use camera position</button>
+    <button type="button" id="mapCancel">Cancel</button>
+    <button type="button" id="mapOk" class="primary">Use this subject</button>
+  </div>
+</dialog>
+
+<dialog id="settings">
+  <form method="dialog">
+    <h2>Settings</h2>
+    <p class="note">Stored in this browser only, never in a file.</p>
+
+    <h3>Vision model</h3>
+    <div class="presets">
+      <button type="button" data-url="http://localhost:11434/api/chat">Ollama on this PC</button>
+      <button type="button" data-url="https://ollama.com/api/chat">Ollama cloud</button>
+      <button type="button" data-url="https://YOUR-OPENWEBUI/api/chat/completions">Open WebUI</button>
+      <button type="button" data-url="https://YOUR-SERVER/v1/chat/completions">OpenAI-compatible (LiteLLM…)</button>
+    </div>
+    <label>Endpoint URL — ending <code>/api/chat</code> is spoken to as Ollama, anything else as OpenAI chat completions</label>
+    <input id="s_vurl" placeholder="http://localhost:11434/api/chat">
+    <label>Model (must accept images, e.g. qwen2.5vl, gemma3, llama3.2-vision)</label>
+    <input id="s_vmodel" placeholder="qwen2.5vl:7b">
+    <label>API key (blank for a local Ollama)</label>
+    <input id="s_vkey" type="password" autocomplete="off">
+    <p class="note">A local Ollama only answers this page if started with <code>OLLAMA_ORIGINS=*</code> (pages opened from disk send <code>Origin: null</code>).</p>
+
+    <h3>Geograph</h3>
+    <label>API key (optional — searches work without one)</label>
+    <input id="s_gkey" autocomplete="off">
+    <label>Upload user ID and validation token (from the JUppy login, see below)</label>
+    <div class="grid2"><input id="s_guid" placeholder="user_id"><input id="s_gval" placeholder="validation" autocomplete="off"></div>
+    <p class="note">To get them, open in a new tab (your password goes to Geograph only, over HTTPS; this page never sees it):<br>
+    <code>https://www.geograph.org.uk/juploader.php?action=login&amp;username=YOUR_NAME&amp;password=YOUR_PASSWORD</code><br>
+    and copy <code>&lt;user_id&gt;</code> and <code>&lt;validation&gt;</code> from the reply. Geograph only allows this upload route
+    after 5 submissions through its website; until these are filled in, each card offers “Submit through website” instead.</p>
+
+    <h3>Rules</h3>
+    <div class="grid2">
+      <div><label>Search radius (m) — 75 reaches a 100 m square's corners</label><input id="s_radius" type="number" min="50" max="500"></div>
+      <div><label>Exclude photos whose GPS error exceeds (m)</label><input id="s_maxerr" type="number" min="5" max="1000"></div>
+    </div>
+    <menu style="padding:0;margin:12px 0 0;display:flex;gap:8px;justify-content:flex-end">
+      <button value="cancel">Cancel</button><button id="saveSettings" value="ok" class="primary">Save</button>
+    </menu>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+/* ---------- small helpers ---------- */
+const $ = s => document.querySelector(s);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
+};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function log(msg) { const el = $('#log'); el.textContent = (new Date().toLocaleTimeString() + '  ' + msg + '\n' + el.textContent).slice(0, 6000); }
+function setStatus(s) { $('#status').textContent = s; }
+
+const DEFAULTS = { vurl: '', vmodel: '', vkey: '', gkey: '', guid: '', gval: '', radius: 75, maxerr: 15 };
+let settings = Object.assign({}, DEFAULTS, store.get('gcs.settings', {}));
+
+/* ---------- coordinates: OSTN15 for Great Britain, Irish Grid for Ireland ---------- */
+let gridReady = null;
+function initGrid() {
+  if (!gridReady) gridReady = (async () => {
+    const b64 = window.OSTN15_TIF_B64, bin = atob(b64), u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const tiff = await GeoTIFF.fromArrayBuffer(u8.buffer);
+    await proj4.nadgrid('OSTN15', tiff).ready;
+    proj4.defs('BNG', '+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +units=m +no_defs +nadgrids=OSTN15');
+    proj4.defs('IG', '+proj=tmerc +lat_0=53.5 +lon_0=-8 +k=1.000035 +x_0=200000 +y_0=250000 +ellps=mod_airy +towgs84=482.5,-130.6,564.6,-1.042,-0.214,-0.631,8.15 +units=m +no_defs');
+  })();
+  return gridReady;
+}
+// Coarse outline of the island of Ireland (keeps Kintyre, the Rhins and the Isle of Man out).
+const IRELAND = [[55.5,-10.8],[55.5,-6.3],[55.32,-6.0],[54.7,-5.35],[54.2,-5.35],[53.5,-5.9],[52.0,-6.0],[51.3,-9.0],[51.3,-10.8]];
+function inPoly(lat, lon, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [yi, xi] = poly[i], [yj, xj] = poly[j];
+    if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function gbRef(e, n, digits) {
+  const e100k = Math.floor(e / 1e5), n100k = Math.floor(n / 1e5);
+  if (e100k < 0 || e100k > 6 || n100k < 0 || n100k > 12) return null;
+  let l1 = (19 - n100k) - (19 - n100k) % 5 + Math.floor((e100k + 10) / 5);
+  let l2 = (19 - n100k) * 5 % 25 + e100k % 5;
+  if (l1 > 7) l1++; if (l2 > 7) l2++;
+  const div = 10 ** (5 - digits), f = v => String(Math.floor((v % 1e5) / div)).padStart(digits, '0');
+  return String.fromCharCode(l1 + 65, l2 + 65) + f(e) + f(n);
+}
+function igRef(e, n, digits) {
+  const e100k = Math.floor(e / 1e5), n100k = Math.floor(n / 1e5);
+  if (e100k < 0 || e100k > 4 || n100k < 0 || n100k > 4) return null;
+  const div = 10 ** (5 - digits), f = v => String(Math.floor((v % 1e5) / div)).padStart(digits, '0');
+  return 'ABCDEFGHJKLMNOPQRSTUVWXYZ'[(4 - n100k) * 5 + e100k] + f(e) + f(n);
+}
+// -> {grid:'GB'|'IE', e, n, square, cs, ref8, edge} or null when outside Geograph's area
+function locate(lat, lon) {
+  const grid = inPoly(lat, lon, IRELAND) ? 'IE' : 'GB';
+  if (grid === 'GB' && (lat < 49.8 || lat > 61 || lon < -8.7 || lon > 2)) return null;
+  const [e, n] = proj4('WGS84', grid === 'GB' ? 'BNG' : 'IG', [lon, lat]);
+  if (!isFinite(e) || !isFinite(n)) return null;
+  const R = grid === 'GB' ? gbRef : igRef, cs = R(e, n, 3);
+  if (!cs) return null;
+  const edge = Math.min(e % 100, 100 - e % 100, n % 100, 100 - n % 100);
+  return { grid, e, n, square: R(e, n, 2), cs, ref8: R(e, n, 4), edge };
+}
+function cellCentreLatLon(p) {
+  const e = Math.floor(p.loc.e / 100) * 100 + 50, n = Math.floor(p.loc.n / 100) * 100 + 50;
+  const [lon, lat] = proj4(p.loc.grid === 'GB' ? 'BNG' : 'IG', 'WGS84', [e, n]);
+  return [lat, lon];
+}
+function spaced(ref) { const m = /^([A-Z]{1,2})(\d+)$/.exec(ref); if (!m) return ref; const h = m[2].length / 2; return `${m[1]} ${m[2].slice(0, h)} ${m[2].slice(h)}`; }
+// Parse "NU 218 359" / "NU2180035900" / "M1234" -> pseudo location {grid, e, n, cs} at the centre of the stated precision.
+const GB_LETTERS = (() => { const m = {}; for (let e = 0; e <= 6; e++) for (let n = 0; n <= 12; n++) { const r = gbRef(e * 1e5 + 1, n * 1e5 + 1, 1); if (r) m[r.slice(0, 2)] = [e, n]; } return m; })();
+function parseRef(text) {
+  const m = /^\s*([A-HJ-Z]{1,2})\s*(\d+)\s*(\d*)\s*$/i.exec(text || ''); if (!m) return null;
+  const L = m[1].toUpperCase(); let digits = m[2] + m[3];
+  if (digits.length % 2 || digits.length < 2 || digits.length > 10) return null;
+  const h = digits.length / 2, unit = 10 ** (5 - h);
+  let grid, e0, n0;
+  if (L.length === 2) { if (!GB_LETTERS[L]) return null; grid = 'GB'; [e0, n0] = GB_LETTERS[L]; }
+  else { const i = 'ABCDEFGHJKLMNOPQRSTUVWXYZ'.indexOf(L); if (i < 0) return null; grid = 'IE'; e0 = i % 5; n0 = 4 - Math.floor(i / 5); }
+  const e = e0 * 1e5 + (+digits.slice(0, h)) * unit + unit / 2, n = n0 * 1e5 + (+digits.slice(h)) * unit + unit / 2;
+  const R = grid === 'GB' ? gbRef : igRef;
+  return { grid, e, n, cs: h >= 3 ? R(e, n, 3) : null, square: R(e, n, 2) };
+}
+function destination(lat, lon, brg, d) {
+  const t = Math.PI / 180, dd = d / 6371000, th = brg * t, p1 = lat * t, l1 = lon * t;
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(dd) + Math.cos(p1) * Math.sin(dd) * Math.cos(th));
+  const l2 = l1 + Math.atan2(Math.sin(th) * Math.sin(dd) * Math.cos(p1), Math.cos(dd) - Math.sin(p1) * Math.sin(p2));
+  return [p2 / t, l2 / t];
+}
+const COMPASS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+const compass = d => COMPASS[Math.round(((d % 360) + 360) % 360 / 22.5) % 16];
+function distBearing(lat1, lon1, lat2, lon2) {
+  const R = 6371000, t = Math.PI / 180, dlat = (lat2 - lat1) * t, dlon = (lon2 - lon1) * t;
+  const a = Math.sin(dlat / 2) ** 2 + Math.cos(lat1 * t) * Math.cos(lat2 * t) * Math.sin(dlon / 2) ** 2;
+  const d = 2 * R * Math.asin(Math.sqrt(a));
+  const y = Math.sin(dlon) * Math.cos(lat2 * t), x = Math.cos(lat1 * t) * Math.sin(lat2 * t) - Math.sin(lat1 * t) * Math.cos(lat2 * t) * Math.cos(dlon);
+  return [d, (Math.atan2(y, x) / t + 360) % 360];
+}
+
+/* ---------- reading the folder ---------- */
+let photos = [];          // {key, file, name, exif..., loc, flags[]}
+let folderName = '';
+let state = { photos: {} };   // decisions and text, persisted per folder
+// Geograph's answers, one per 100 m square, shared by every folder and kept for 30 days.
+const DENSITY_TTL = 30 * 864e5;
+const densityCache = Object.fromEntries(Object.entries(store.get('gcs.density', {})).filter(([, v]) => Date.now() - v.at < DENSITY_TTL));
+const densityOf = p => p.loc ? densityCache[cellKey(p)] : undefined;
+const busy = new Map();   // photo key -> 'describe' | 'submit' while a request is in flight
+const subjKey = cs => `${cs}@${settings.radius}`;
+// The square that matters on Geograph is the subject's; use it once known, else the camera's.
+function effDensity(p) { const si = (state.photos[p.key] || {}).subjectInfo; return si && si.cs ? densityCache[subjKey(si.cs)] : densityOf(p); }
+function saveDensity() { if (!store.set('gcs.density', densityCache)) log('Browser storage is full — Geograph answers will be asked for again next time.'); }
+const stateKey = () => 'gcs.state.' + folderName;
+function saveState() {
+  if (!folderName) return;
+  if (!store.set(stateKey(), state)) log('Browser storage is full or unavailable — use “Save state…” to keep your work.');
+}
+async function walk(dir, prefix, out) {
+  for await (const [name, h] of dir.entries()) {
+    if (name.startsWith('.') || name === 'lib') continue;
+    if (h.kind === 'directory') await walk(h, prefix + name + '/', out);
+    else if (/\.jpe?g$/i.test(name)) out.push({ key: prefix + name, name, getFile: () => h.getFile() });
+    else if (name === '.immich-mirror.json') out.manifest = h;
+  }
+}
+async function filesFromHandle(dir) {
+  const out = [];
+  await walk(dir, '', out);
+  // An Immich mirror lists the album's own photographs; use only those when present.
+  try {
+    const mh = await dir.getFileHandle('.immich-mirror.json');
+    const m = JSON.parse(await (await mh.getFile()).text());
+    const allowed = new Set(Object.values(m.assets || {}).map(a => a.file));
+    const res = out.filter(f => allowed.has(f.key)); res.label = albumLabel(m); return res;
+  } catch { return out; }
+}
+// Mirror folders are all called photos-trip, so name a mirrored folder after its Immich album.
+function albumLabel(m) { const t = String(m && m.source || '').replace(/\/+$/, '').split('/').pop(); return t || null; }
+async function filesFromInput(list) {
+  const all = [...list];
+  const man = all.find(f => f.name === '.immich-mirror.json' && f.webkitRelativePath.split('/').length === 2);
+  let allowed = null;
+  let label = null;
+  if (man) { try { const m = JSON.parse(await man.text()); allowed = new Set(Object.values(m.assets || {}).map(a => a.file)); label = albumLabel(m); } catch {} }
+  const res = all.filter(f => /\.jpe?g$/i.test(f.name) && !f.webkitRelativePath.split('/').some(p => p.startsWith('.')))
+    .map(f => ({ key: f.webkitRelativePath.split('/').slice(1).join('/'), name: f.name, getFile: async () => f }))
+    .filter(f => !allowed || allowed.has(f.key));
+  res.label = label; return res;
+}
+function dms(v, ref) {
+  if (v == null) return null;
+  const x = Array.isArray(v) ? v[0] + (v[1] || 0) / 60 + (v[2] || 0) / 3600 : +v;
+  return (ref === 'S' || ref === 'W') ? -x : x;
+}
+async function readPhoto(f) {
+  const file = await f.getFile();
+  const p = { key: f.key, name: f.name, file, flags: [] };
+  let x = null;
+  try { x = await exifr.parse(file, { tiff: true, exif: true, gps: true, ifd0: true, reviveValues: false, translateValues: false, mergeOutput: true }); }
+  catch (err) { p.flags.push('unreadable EXIF'); }
+  x = x || {};
+  p.model = [x.Make, x.Model].filter(Boolean).join(' ');
+  p.device = String(x.Model || '').trim() || 'no camera details';   // model only: one phone writes "samsung", another "SAMSUNG"
+  p.taken = typeof x.DateTimeOriginal === 'string' ? x.DateTimeOriginal : '';
+  const lat = x.latitude ?? dms(x.GPSLatitude, x.GPSLatitudeRef), lon = x.longitude ?? dms(x.GPSLongitude, x.GPSLongitudeRef);
+  if (lat != null && lon != null && !(lat === 0 && lon === 0)) { p.lat = lat; p.lon = lon; }
+  if (x.GPSImgDirection != null) { p.heading = +x.GPSImgDirection; p.headingRef = x.GPSImgDirectionRef || ''; }
+  if (x.GPSHPositioningError != null) p.herr = +x.GPSHPositioningError;
+  if (p.lat == null) p.flags.push('no GPS');
+  else {
+    p.loc = locate(p.lat, p.lon);
+    if (!p.loc) p.flags.push('outside Britain and Ireland');
+    if (p.herr > settings.maxerr) p.flags.push(`GPS error ${Math.round(p.herr)} m`);
+  }
+  return p;
+}
+// Phones without an accuracy field (many Android cameras): flag a fix that jumps implausibly far from both neighbours in time.
+function flagJumps(list) {
+  const t = p => { const m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(p.taken); return m ? Date.UTC(m[1], m[2] - 1, m[3], m[4], m[5], m[6]) / 1000 : null; };
+  const seq = list.filter(p => p.loc && t(p) != null).sort((a, b) => t(a) - t(b));
+  seq.forEach((p, i) => {
+    const sp = [seq[i - 1], seq[i + 1]].filter(Boolean).map(q => { const d = Math.hypot(p.loc.e - q.loc.e, p.loc.n - q.loc.n); return [d, d / Math.max(Math.abs(t(p) - t(q)), 1)]; });
+    if (sp.length && sp.every(([d, v]) => d > 200 && v > 70)) p.flags.push('position jumps — stale fix?');
+  });
+}
+
+let currentDir = null;
+async function loadFolder(getList, name, handle) {
+  currentDir = handle || null;
+  setStatus('Loading the coordinate grid…');
+  await initGrid();
+  const list = await getList();
+  folderName = list.label || name;
+  state = Object.assign({ photos: {} }, store.get(stateKey(), {}));
+  if (list.label && list.label !== name && !Object.keys(state.photos).length) {   // earlier versions kept state under the bare folder name
+    const old = store.get('gcs.state.' + name, null), keys = new Set(list.map(f => f.key));
+    if (old && old.photos) { for (const [k, v] of Object.entries(old.photos)) if (keys.has(k)) state.photos[k] = v;
+                             if (Object.keys(state.photos).length) log(`Carried over ${Object.keys(state.photos).length} photo decisions saved under “${name}”.`); }
+    if (old && old.density) { for (const [k, v] of Object.entries(old.density)) if (!densityCache[k]) densityCache[k] = v; saveDensity(); }
+  }
+  if (state.density) { for (const [k, v] of Object.entries(state.density)) if (!densityCache[k]) densityCache[k] = v; delete state.density; saveDensity(); }
+  saveState();
+  if (handle) remember(handle, folderName);
+  document.title = `Geograph cold spots — ${folderName}`;
+  photos = [];
+  for (let i = 0; i < list.length; i++) {
+    photos.push(await readPhoto(list[i]));
+    if (i % 20 === 0) setStatus(`Reading photographs ${i + 1}/${list.length}…`);
+  }
+  flagJumps(photos);
+  fillDevices();
+  const located = photos.filter(p => p.loc && !p.flags.length);
+  log(`${folderName}: ${photos.length} photographs, ${located.length} with usable positions in ${new Set(located.map(p => p.loc.cs)).size} hundred-metre squares.`);
+  render();
+  densityRun();
+}
+
+/* ---------- Geograph density (syndicator.php JSON: sends Access-Control-Allow-Origin: *, no key needed) ---------- */
+// Not JSONP: Geograph labels the reply application/json with nosniff, so Chrome refuses to run it as a script.
+class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
+async function getJSON(url, timeout = 25000) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), timeout);
+  try {
+    let r;
+    try { r = await fetch(url, { signal: ctl.signal }); }
+    catch (err) { throw new Error(err.name === 'AbortError' ? 'timed out' : 'network error (offline, or blocked)'); }
+    if (!r.ok) throw new HttpError(r.status, `HTTP ${r.status}`);
+    const cs = (/charset=([\w-]+)/i.exec(r.headers.get('content-type') || '') || [])[1] || 'utf-8';
+    const text = new TextDecoder(cs).decode(await r.arrayBuffer());
+    try { return JSON.parse(text); } catch { throw new Error('reply was not JSON: ' + text.slice(0, 80)); }
+  } finally { clearTimeout(timer); }
+}
+const cellKey = p => `${p.loc.cs}@${settings.radius}`;
+async function fetchDensity(p) {
+  const [lat, lon] = cellCentreLatLon(p);
+  let url = `https://api.geograph.org.uk/syndicator.php?format=JSON&location=${lat.toFixed(6)},${lon.toFixed(6)}` +
+            `&distance=${(settings.radius / 1000).toFixed(3)}&perpage=100`;
+  if (settings.gkey) url += '&key=' + encodeURIComponent(settings.gkey);
+  const d = await getJSON(url);
+  const items = (d && d.items) || [];
+  const m = /\((\d+) in total\)/.exec(d && d.description || '');
+  const total = m ? +m[1] : items.length;
+  const near = items.map(it => {
+    const L = (it.lat != null && it.long != null) ? locate(+it.lat, +it.long) : null;
+    return { id: it.guid, title: it.title, link: it.link, thumb: it.thumb, author: it.author, taken: it.imageTaken,
+             tags: it.tags || '', lat: +it.lat, lon: +it.long, cs: L ? L.cs : null };
+  });
+  const inCell = near.filter(x => x.cs === p.loc.cs).length;
+  return { inCell, total, capped: total > items.length, at: Date.now(),
+           near: near.sort((a, b) => (b.cs === p.loc.cs) - (a.cs === p.loc.cs)).slice(0, 12) };
+}
+let densityRunning = false, densityPaused = '';
+// Polite to a volunteer-run server: one request a second; after a failure wait 10 s then 60 s;
+// three failures in a row, or any 429/5xx "slow down / unwell" answer, stops the run until you press Retry.
+async function densityRun() {
+  if (densityRunning) return; densityRunning = true; densityPaused = ''; $('#retry').hidden = true;
+  try {
+    const todo = [...new Map(photos.filter(p => p.loc && !p.flags.length && !densityOf(p)).map(p => [cellKey(p), p])).values()];
+    let fails = 0;
+    for (let i = 0; i < todo.length; i++) {
+      const p = todo[i];
+      setStatus(`Asking Geograph about square ${i + 1}/${todo.length} (${p.loc.cs})…`);
+      try {
+        densityCache[cellKey(p)] = await fetchDensity(p); saveDensity(); fails = 0;
+      } catch (err) {
+        fails++;
+        log(`Geograph search for ${p.loc.cs} failed: ${err.message}`);
+        if (fails >= 3 || err.status === 429 || err.status >= 500) {
+          densityPaused = `Stopped asking Geograph after ${fails > 1 ? fails + ' failures in a row' : err.message} — ${todo.length - i} squares left. Retry when it is answering.`;
+          break;
+        }
+        await sleep(fails === 1 ? 10000 : 60000);
+        i--; continue;   // try the same square again after the pause
+      }
+      if (i % 5 === 4 || i === todo.length - 1) render();
+      await sleep(1000);
+    }
+  } finally {
+    densityRunning = false; render();
+    if (densityPaused) { setStatus(densityPaused); $('#retry').hidden = false; log(densityPaused); } else summarise();
+  }
+}
+function summarise() {
+  if (densityPaused) { setStatus(densityPaused); return; }
+  const located = photos.filter(p => p.loc && !p.flags.length);
+  const d = densityOf;
+  const known = located.filter(d), empty = known.filter(p => d(p).inCell === 0);
+  setStatus(`${located.length} located photos · ${empty.length} in ${new Set(empty.map(p => p.loc.cs)).size} empty squares · ` +
+            `${located.length - known.length} squares still to check`);
+}
+
+/* ---------- vision model: Ollama /api/chat or OpenAI-style chat completions ---------- */
+async function jpegB64(file, maxSide) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close();
+  return c.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+function buildPrompt(p, cands) {
+  const near = cands.map((x, i) => `[${i + 1}] ${x.src === 'osm' ? `map feature "${x.title}" (${x.kind})` : `Geograph picture "${x.title}"`} — ` +
+      `${Math.round(x.dist)} m ${compass(x.brg)} of the camera${x.ahead && p.heading != null ? ', in the direction it faced' : ''}`)
+    .join('\n') || '(nothing named within 1.5 km)';
+  const facing = p.heading != null ? `${Math.round(p.heading)}° (${compass(p.heading)}${p.headingRef === 'M' ? ', magnetic' : ''})` : 'unknown';
+  return `You are helping to caption a photograph for Geograph Britain and Ireland, a project that documents the geography of every grid square.
+
+Facts about this photograph:
+- Taken: ${p.taken ? p.taken.replace(/^(\d{4}):(\d\d):(\d\d)/, '$3/$2/$1') : 'unknown'}
+- Camera position: OS grid reference ${spaced(p.loc.ref8)}
+- Camera facing: ${facing}
+- Named map features (OpenStreetMap) and existing Geograph pictures nearby, numbered (use them to name places and features correctly):
+${near}
+
+Look at the image and reply with JSON only, no other text:
+{"suitable": true or false,
+ "reason": "one short sentence",
+ "main_subject": "landscape | coast | building | structure | street | transport | farmland | water | wildlife | people | pet | food | interior | other",
+ "title": "short title, at most 8 words, naming the feature and the place",
+ "description": "1 to 3 factual sentences in British English on what is shown and where",
+ "subject_tag": "one Geograph subject tag, e.g. subject:harbour",
+ "same_subject_as": the number of the listed map feature or Geograph picture that IS the main subject (the same lighthouse, island, church, hill...), or null,
+ "subject_distance_m": rough distance in metres from the camera to the main subject, or null if it is close or unclear}
+
+Rules: "suitable" is false when people, pets, food or an indoor scene are the main subject, or the picture shows nothing geographical.
+Only name places or features that are visible or that appear in the titles above; do not invent history, dates or names.
+Do not mention the camera, the photographer, the boat or vehicle you were in, or the weather unless it matters to the scene.
+Never put grid references or coordinates in the title or description. If you cannot name the place from the titles above, describe it plainly ("Lighthouse on a rocky island") rather than guessing a name.
+Choose "same_subject_as" only when that entry clearly is the main subject of this photograph; prefer a map feature over a picture when both fit.`;
+}
+async function viewContext(p) {
+  const key = 'view:' + p.loc.ref8;
+  if (densityCache[key]) return densityCache[key];
+  let url = `https://api.geograph.org.uk/syndicator.php?format=JSON&location=${p.lat.toFixed(6)},${p.lon.toFixed(6)}&distance=1&perpage=100`;
+  if (settings.gkey) url += '&key=' + encodeURIComponent(settings.gkey);
+  const d = await getJSON(url);
+  const items = ((d && d.items) || []).filter(it => it.lat != null).map(it => ({ id: it.guid, title: (it.title || '').replace(/^[A-Z]{1,2}\d+\s*:\s*/, ''),
+    link: it.link, lat: +it.lat, lon: +it.long }));
+  densityCache[key] = { at: Date.now(), items }; saveDensity();
+  return densityCache[key];
+}
+// Named features from OpenStreetMap (Overpass API: free, no key, sends CORS headers). One coordinate per photo is
+// an insubstantial extract under the ODbL. Google's Places data may not be copied into another database, so it is not used.
+const OVERPASS = 'https://overpass-api.de/api/interpreter';
+const OSM_KINDS = ['man_made', 'historic', 'natural', 'place', 'tourism', 'leisure', 'waterway', 'building', 'amenity', 'railway', 'landuse'];
+async function osmFeatures(p) {
+  const key = 'osm:' + p.loc.ref8;
+  if (densityCache[key]) return densityCache[key];
+  const q = `[out:json][timeout:25];nwr(around:1500,${p.lat.toFixed(6)},${p.lon.toFixed(6)})[name][!highway][!shop][!"addr:housenumber"]` +
+    `[amenity!~"^(bench|parking|parking_entrance|toilets|post_box|telephone|fast_food|cafe|restaurant|pub|bar|atm|vending_machine|waste_basket|recycling|charging_station|bicycle_parking|bus_station)$"];out center tags 300;`;
+  let r;
+  try { r = await fetch(OVERPASS, { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }); }
+  catch { throw new Error('OpenStreetMap (Overpass) could not be reached'); }
+  if (!r.ok) throw new HttpError(r.status, `OpenStreetMap (Overpass) answered HTTP ${r.status}`);
+  const j = await r.json();
+  const items = (j.elements || []).map(el => {
+    const t = el.tags || {}, lat = el.lat ?? (el.center && el.center.lat), lon = el.lon ?? (el.center && el.center.lon);
+    const k = OSM_KINDS.find(k => t[k]); 
+    return lat == null ? null : { title: t.name, kind: k ? (t[k] === 'yes' ? k : t[k].replace(/_/g, ' ')) : 'place', lat, lon,
+      exact: el.type === 'node', src: 'osm', link: `https://www.openstreetmap.org/${el.type}/${el.id}` };
+  }).filter(Boolean);
+  items.forEach(x => x.d = distBearing(p.lat, p.lon, x.lat, x.lon)[0]);
+  densityCache[key] = { at: Date.now(), items: items.sort((a, b) => a.d - b.d).slice(0, 150) }; saveDensity();
+  return densityCache[key];
+}
+// "55.6185, -1.6560", a Google Maps link (pin !3d..!4d.., ?q=lat,lon or @lat,lon) -> [lat, lon]
+function parseLatLon(text) {
+  const t = decodeURIComponent(text || '');
+  const m = /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/.exec(t) || /[?&](?:q|query|ll|destination|center)=(-?\d+\.\d+),\s*(-?\d+\.\d+)/.exec(t) ||
+            /@(-?\d+\.\d+),(-?\d+\.\d+)/.exec(t) || /^\s*(-?\d{1,2}\.\d+)\s*[,; ]\s*(-?\d{1,3}\.\d+)\s*$/.exec(t);
+  return m ? [+m[1], +m[2]] : null;
+}
+const SHORT_LINK = /goo\.gl|maps\.app/i;
+// Numbered candidates for the model: what lies in the direction the camera faced first, then the nearest.
+function candidates(p, view, osm) {
+  const seen = new Set(), osmC = [], geoC = [];
+  const add = (x, list) => {
+    if (!x.title) return; const k = x.src + ':' + x.title.toLowerCase(); if (seen.has(k)) return; seen.add(k);
+    const [dist, brg] = distBearing(p.lat, p.lon, x.lat, x.lon);
+    const off = p.heading != null ? Math.abs(((brg - p.heading + 540) % 360) - 180) : 180;
+    list.push({ ...x, dist, brg, ahead: off <= 30 || dist < 60 });
+  };
+  for (const x of osm ? osm.items : []) add(x, osmC);
+  for (const x of view ? view.items : []) add({ ...x, src: 'geograph' }, geoC);
+  const order = (a, b) => (b.ahead - a.ahead) || a.dist - b.dist;
+  return [...osmC.sort(order).slice(0, 12), ...geoC.sort(order).slice(0, 10)].sort(order);
+}
+function parseJSONish(text) {
+  if (!text) throw new Error('empty reply');
+  try { return JSON.parse(text); } catch {}
+  const m = /\{[\s\S]*\}/.exec(text);
+  if (m) return JSON.parse(m[0]);
+  throw new Error('reply was not JSON: ' + text.slice(0, 120));
+}
+async function describe(p, cands) {
+  if (!settings.vurl || !settings.vmodel) throw new Error('set the vision model in Settings first');
+  const img = await jpegB64(p.file, 1024), prompt = buildPrompt(p, cands);
+  const native = /\/api\/chat\/?$/.test(settings.vurl);
+  const headers = { 'Content-Type': 'application/json' };
+  if (settings.vkey) headers.Authorization = 'Bearer ' + settings.vkey;
+  const body = native
+    ? { model: settings.vmodel, stream: false, format: 'json', options: { temperature: 0.2 },
+        messages: [{ role: 'user', content: prompt, images: [img] }] }
+    : { model: settings.vmodel, stream: false, temperature: 0.2,
+        messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + img } }] }] };
+  let r;
+  try { r = await fetch(settings.vurl, { method: 'POST', headers, body: JSON.stringify(body) }); }
+  catch (err) { throw new Error(`could not reach ${settings.vurl} — if the server is up, it is probably refusing this page (CORS)`); }
+  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
+  const j = await r.json();
+  return parseJSONish(native ? j.message && j.message.content : j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content);
+}
+
+/* ---------- submitting through Geograph's application upload interface (juploader.php, as used by JUppy) ---------- */
+const JUP = 'https://www.geograph.org.uk/juploader.php';
+const LICENCE = 'I grant you the permission to use this submission under the terms of the Creative Commons by-sa-2.0 licence';
+let corsKnown = null;
+async function geographReadable() {   // can this page read Geograph's replies? (only if it sends CORS headers)
+  if (corsKnown == null) { try { const r = await fetch(JUP + '?action=getclass', { mode: 'cors' }); corsKnown = r.ok; } catch { corsKnown = false; } }
+  return corsKnown;
+}
+async function uploadBlob(p) {
+  if (p.file.size <= 8e6) return p.file;   // original, EXIF intact
+  const b64 = await jpegB64(p.file, 2400), bin = atob(b64), u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Blob([u8], { type: 'image/jpeg' });
+}
+const GEOGRAPH_FORM = 'https://www.geograph.org.uk/submit2.php';
+// A folder of copies for uploading through the website, chosen once and remembered. Never the photo folder.
+async function uploadDir() {
+  let dir = null;
+  try { dir = await idb.get('uploadDir'); } catch {}
+  if (dir) {
+    let perm = await dir.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') perm = await dir.requestPermission({ mode: 'readwrite' });
+    if (perm === 'granted') return dir;
+  }
+  alertless('Choose a folder for upload copies, e.g. Downloads\\Geograph uploads (not the photo folder).');
+  dir = await showDirectoryPicker({ mode: 'readwrite', id: 'geograph-uploads', startIn: 'downloads' });
+  if (currentDir && ((await currentDir.isSameEntry(dir)) || (await currentDir.resolve(dir)))) throw new Error('that is the photo folder — choose another one');
+  try { await idb.set('uploadDir', dir); } catch {}
+  return dir;
+}
+function alertless(msg) { setStatus(msg); }
+async function saveUploadCopy(p, f) {
+  if (!window.showDirectoryPicker) return null;
+  const dir = await uploadDir();
+  const ref = f.subject ? f.subject.replace(/\s+/g, '').toUpperCase() : '';
+  const name = (ref && /^[A-Z]{1,2}\d{4,10}$/.test(ref) ? ref + '_' : '') + p.name.replace(/\.jpeg$/i, '.jpg');
+  const upright = await uprightCopy(p.file);   // null when the photo has no rotation flag
+  const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
+  await w.write(upright || p.file); await w.close();   // EXIF (camera position, date, heading) kept either way
+  summarise();
+  return { name, dir: dir.name, rotated: !!upright };
+}
+// Phones often store a picture sideways or upside down plus an EXIF Orientation flag; Geograph's form shows the raw pixels.
+// Make a copy with the pixels turned upright and the flag reset to 1, keeping the original Exif block (GPS, date, heading).
+async function uprightCopy(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  if (buf[0] !== 0xFF || buf[1] !== 0xD8) return null;
+  let i = 2, app1 = null;
+  while (i + 10 < buf.length && buf[i] === 0xFF) {
+    const m = buf[i + 1], len = (buf[i + 2] << 8) | buf[i + 3];
+    if (m === 0xE1 && String.fromCharCode(...buf.slice(i + 4, i + 8)) === 'Exif') { app1 = buf.slice(i, i + 2 + len); break; }
+    if (m === 0xDA) break;
+    i += 2 + len;
+  }
+  if (!app1) return null;
+  const T = 10, dv = new DataView(app1.buffer), le = app1[T] === 0x49;
+  const u16 = o => dv.getUint16(o, le), u32 = o => dv.getUint32(o, le);
+  const ifd0 = T + u32(T + 4), n = u16(ifd0);
+  let orient = 1, orientAt = -1, exifAt = -1;
+  for (let k = 0; k < n; k++) {
+    const e = ifd0 + 2 + k * 12, tag = u16(e);
+    if (tag === 0x0112) { orient = u16(e + 8); orientAt = e + 8; }
+    if (tag === 0x8769) exifAt = T + u32(e + 8);
+  }
+  if (orientAt < 0 || orient <= 1 || orient > 8) return null;
+  dv.setUint16(orientAt, 1, le);
+  dv.setUint32(ifd0 + 2 + n * 12, 0, le);   // drop the (unrotated) embedded thumbnail
+  if (orient >= 5 && exifAt > 0) {          // quarter turns swap width and height
+    const m2 = u16(exifAt); let xAt = -1, yAt = -1, xt = 0, yt = 0;
+    for (let k = 0; k < m2; k++) { const e = exifAt + 2 + k * 12, tag = u16(e);
+      if (tag === 0xA002) { xAt = e + 8; xt = u16(e + 2); } if (tag === 0xA003) { yAt = e + 8; yt = u16(e + 2); } }
+    if (xAt > 0 && yAt > 0) { const rd = (a, t) => t === 3 ? u16(a) : u32(a), wr = (a, t, v) => t === 3 ? dv.setUint16(a, v, le) : dv.setUint32(a, v, le);
+      const x = rd(xAt, xt), y = rd(yAt, yt); wr(xAt, xt, y); wr(yAt, yt, x); }
+  }
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+  c.getContext('2d').drawImage(bmp, 0, 0); bmp.close();
+  const jpg = new Uint8Array(await (await new Promise(res => c.toBlob(res, 'image/jpeg', 0.95))).arrayBuffer());
+  let j = 2;   // skip the canvas's own APP0 (JFIF) so the Exif block sits straight after SOI
+  if (jpg[2] === 0xFF && jpg[3] === 0xE0) j = 4 + ((jpg[4] << 8) | jpg[5]);
+  return new Blob([jpg.slice(0, 2), app1, jpg.slice(j)], { type: 'image/jpeg' });
+}
+const direct = () => !!(settings.guid && settings.gval);   // JUppy credentials present -> upload straight from the page
+async function submit(p, f) {
+  if (!settings.guid || !settings.gval) throw new Error('set your Geograph upload user ID and token in Settings first');
+  const fd = new FormData();
+  fd.append('userid', settings.guid); fd.append('validation', settings.gval);
+  fd.append('cclicence', LICENCE);
+  fd.append('subject', f.subject); fd.append('photographer', f.camera);
+  fd.append('direction', f.direction === '' ? '-1' : String(f.direction));
+  fd.append('date', f.date); fd.append('title', f.title); fd.append('comments', f.description);
+  fd.append('feature', f.tag); fd.append('supplemental', '');
+  fd.append('uploadfile', await uploadBlob(p), p.name);
+  if (await geographReadable()) {
+    const r = await fetch(JUP + '?action=upload', { method: 'POST', body: fd });
+    const t = await r.text();   // the published code answers in XML; the live site answers in plain text ("Not Logged In")
+    const st = ((/<status>([\s\S]*?)<\/status>/.exec(t) || [])[1] || t.replace(/<[^>]*>/g, ' ').trim().slice(0, 200) || `HTTP ${r.status}`).trim();
+    return { confirmed: true, ok: st === 'OK', status: st };
+  }
+  await fetch(JUP + '?action=upload', { method: 'POST', body: fd, mode: 'no-cors' });   // sent; reply unreadable
+  return { confirmed: false, ok: true, status: 'sent — Geograph does not let this page read its reply' };
+}
+
+/* ---------- cards ---------- */
+function band(d) {
+  if (!d) return [densityPaused || !densityRunning ? 'not checked yet' : '…checking', ''];
+  if (d.inCell === 0) return [d.total ? `empty square · ${d.total} within ${settings.radius} m` : `empty · none within ${settings.radius} m`, 'empty'];
+  return [`${d.inCell}${d.capped ? '+' : ''} in this square · ${d.total} within ${settings.radius} m`, d.inCell < 5 ? 'few' : 'busy'];
+}
+function visible() {
+  const f = $('#filter').value, hide = $('#hideDecided').checked;
+  const d = effDensity;
+  let list;
+  const q = $('#find').value.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (q) {   // a search looks through every photograph, whatever the filter
+    const hay = p => { const s = state.photos[p.key] || {}; return [p.key, p.model, p.taken, p.loc && p.loc.ref8, p.loc && spaced(p.loc.ref8), s.title, s.description, s.subject]
+      .filter(Boolean).join(' ').toLowerCase(); };
+    list = photos.filter(p => hay(p).includes(q) || hay(p).replace(/\s/g, '').includes(q.replace(/\s/g, '')));
+  } else if (f === 'excluded') list = photos.filter(p => p.flags.length);
+  else {
+    list = photos.filter(p => p.loc && !p.flags.length);
+    if (f === 'empty') list = list.filter(p => d(p) && d(p).inCell === 0);
+    if (f === 'few') list = list.filter(p => d(p) && d(p).inCell < 5);
+    if (hide) list = list.filter(p => !(state.photos[p.key] || {}).decision);
+  }
+  const dev = $('#device').value;
+  if (dev) list = list.filter(p => p.device === dev);
+  const sort = $('#sort').value;
+  const time = p => p.taken || '9999';   // EXIF local time sorts as text; undated photos last
+  if (sort === 'time') return list.sort((a, b) => time(a).localeCompare(time(b)) || a.key.localeCompare(b.key));
+  if (sort === 'name') return list.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+  const k = p => { const x = d(p); return x ? [x.inCell, x.total] : [1e9, 1e9]; };
+  return list.sort((a, b) => k(a)[0] - k(b)[0] || k(a)[1] - k(b)[1] || (a.loc ? a.loc.cs : '').localeCompare(b.loc ? b.loc.cs : '') || time(a).localeCompare(time(b)));
+}
+// Device and sort choices, remembered per folder.
+const viewKey = () => 'gcs.view.' + folderName;
+function fillDevices() {
+  const n = {}; photos.forEach(p => n[p.device] = (n[p.device] || 0) + 1);
+  const saved = store.get(viewKey(), {});
+  $('#device').innerHTML = `<option value="">All devices (${photos.length})</option>` +
+    Object.keys(n).sort((a, b) => n[b] - n[a]).map(d => `<option value="${esc(d)}">${esc(d)} (${n[d]})</option>`).join('');
+  $('#device').value = n[saved.device] ? saved.device : '';
+  if (saved.sort) $('#sort').value = saved.sort;
+}
+function saveView() { if (folderName) store.set(viewKey(), { device: $('#device').value, sort: $('#sort').value }); render(); }
+const urls = new Map();
+const objUrl = p => { if (!urls.has(p.key)) urls.set(p.key, URL.createObjectURL(p.file)); return urls.get(p.key); };
+function arrowSvg(deg) {
+  return `<svg class="arrow" viewBox="-20 -20 40 40" title="camera facing ${Math.round(deg)}°"><g transform="rotate(${deg})">
+    <path d="M0,-15 L7,5 L0,1 L-7,5 Z" fill="#a3262a"/></g><text y="18" text-anchor="middle" font-size="8">N↑</text></svg>`;
+}
+function defaults(p) {
+  const s = state.photos[p.key] || {};
+  const date = p.taken ? p.taken.replace(/^(\d{4}):(\d\d):(\d\d).*/, '$3/$2/$1') : '';
+  return { title: s.title || '', description: s.description || '', tag: s.tag || '',
+           subject: s.subject || '', camera: p.loc ? spaced(p.loc.ref8) : '',
+           direction: s.direction ?? (p.heading != null ? Math.round(p.heading) % 360 : ''), date: s.date || date };
+}
+function cardHtml(p) {
+  const s = state.photos[p.key] || {}, d = densityOf(p), f = defaults(p);
+  const [btext, bcls] = p.loc ? band(d) : ['', ''];
+  const badges = [];
+  const si = s.subjectInfo, sd = si && densityCache[subjKey(si.cs)];
+  if (p.loc) badges.push(si ? `<span class="badge" title="Geograph files a picture under its subject's square">camera square: ${esc(btext)}</span>`
+                            : `<span class="badge ${bcls}">${esc(btext)}</span>`);
+  if (si) { const [st, sc] = band(sd); badges.unshift(`<span class="badge ${sc}">subject square ${esc(si.cs)}: ${esc(st)}</span>`); }
+  p.flags.forEach(x => badges.push(`<span class="badge bad">${esc(x)}</span>`));
+  if (p.herr != null && !p.flags.length) badges.push(`<span class="badge">GPS ±${p.herr.toFixed(1)} m</span>`);
+  if (p.loc && p.loc.edge < Math.max(p.herr || 5, 3)) badges.push(`<span class="badge warn" title="The position is within its GPS error of the square's edge">${p.loc.edge < 1 ? 'under 1' : Math.round(p.loc.edge)} m from square edge</span>`);
+  if (needsSubject(p)) badges.unshift(`<span class="badge warn" title="Set it with Subject on map if it is one feature; leave blank for a wide view">subject ~${s.llm.dist} m away — not set</span>`);
+  if (s.llm && s.llm.suitable === false) badges.push(`<span class="badge bad" title="${esc(s.llm.reason)}">model: not suitable (${esc(s.llm.main_subject || '')})</span>`);
+  const near = d ? d.near.filter(x => x.thumb).slice(0, 8).map(x =>
+    `<a href="${esc(x.link)}" target="_blank" rel="noopener" title="${esc(x.title)} — ${esc(x.author)}${x.cs === p.loc.cs ? ' (in this square)' : ''}"><img src="${esc(x.thumb)}" loading="lazy" alt=""></a>`).join('') : '';
+  const sq = p.loc ? `https://www.geograph.org.uk/gridref/${p.loc.square}` : '';
+  const sent = s.decision === 'sent', b = busy.get(p.key);
+  return `<div class="card${s.decision ? ' decided' : ''}" data-key="${esc(p.key)}">
+    <div class="pic"><img src="${objUrl(p)}" loading="lazy" alt="">${p.heading != null ? arrowSvg(p.heading) : ''}</div>
+    <div class="body">
+      <div class="row">${p.loc ? `<span class="ref">${esc(spaced(p.loc.ref8))}</span> <a href="${sq}" target="_blank" rel="noopener">Geograph square ${esc(p.loc.square)}</a>
+        · <a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank" rel="noopener">map</a>` : ''}</div>
+      <div class="row">${badges.join('')}</div>
+      <div class="file">${esc(p.key)} · ${esc(p.taken)} · ${esc(p.model)}</div>
+      ${near ? `<div class="near">${near}</div>` : ''}
+      ${p.loc && !p.flags.length ? `
+      <div><label>Title</label><input type="text" data-f="title" value="${esc(f.title)}"></div>
+      <div><label>Description</label><textarea data-f="description">${esc(f.description)}</textarea></div>
+      <div class="grid3">
+        <div><label title="Leave blank for a wide view with no single subject">Subject grid ref (blank: wide view)</label><input type="text" data-f="subject" value="${esc(f.subject)}"></div>
+        <div><label>Camera grid ref</label><input type="text" data-f="camera" value="${esc(f.camera)}"></div>
+        <div><label>Facing °</label><input type="text" data-f="direction" value="${esc(f.direction)}"></div>
+      </div>
+      <div class="grid2">
+        <div><label>Subject tag</label><input type="text" data-f="tag" list="subjects" value="${esc(f.tag)}"></div>
+        <div><label>Date taken (dd/mm/yyyy)</label><input type="text" data-f="date" value="${esc(f.date)}"></div>
+      </div>
+      <div class="row">
+        <button data-act="map">Subject on map</button>
+        <button data-act="describe"${b ? ' disabled' : ''}>${b === 'describe' ? 'Writing…' : 'Write text'}</button>
+        ${direct() ? `<button data-act="submit" class="primary"${sent || b ? ' disabled' : ''}>${sent ? 'Submitted' : b === 'submit' ? 'Sending…' : 'Submit to Geograph'}</button>`
+                   : `<button data-act="web" class="primary"${sent ? ' disabled' : ''} title="Copies the details and opens Geograph's submission form">${sent ? 'Submitted' : 'Submit through website'}</button>
+                      ${s.webCopied && !sent ? `<button data-act="marksent">Mark submitted</button> <a href="${GEOGRAPH_FORM}" target="_blank" rel="noopener">Geograph's form</a>` : ''}`}
+        <button data-act="skip">${s.decision === 'skip' ? 'Undo skip' : 'Skip'}</button>
+        <button data-act="unsuitable">${s.decision === 'unsuitable' ? 'Undo' : 'Not suitable'}</button>
+      </div>
+      <div class="note${b ? '' : s.noteCls ? ' ' + s.noteCls : ''}" data-note>${esc(b === 'describe' ? 'Asking the vision model… the first request can take a minute while the model loads.' : b === 'submit' ? 'Sending to Geograph…' : s.note || '')}</div>` : ''}
+    </div></div>`;
+}
+function render() {
+  // don't pull the page out from under someone typing; try again shortly
+  if (document.activeElement && document.activeElement.closest && document.activeElement.closest('.card [data-f]')) { clearTimeout(render.t); render.t = setTimeout(render, 3000); return; }
+  const main = $('#cards'), list = visible();
+  main.querySelectorAll('.card, .intro').forEach(el => el.remove());
+  const frag = document.createElement('template');
+  frag.innerHTML = list.length ? list.map(cardHtml).join('') :
+    `<div class="intro">${photos.length ? 'Nothing to show with this filter.' : ''}</div>`;
+  main.insertBefore(frag.content, $('#log'));
+  if (!densityRunning) summarise();
+}
+function rerenderCard(p) {
+  const old = document.querySelector(`.card[data-key="${CSS.escape(p.key)}"]`);
+  if (!old) return;
+  const t = document.createElement('template'); t.innerHTML = cardHtml(p); old.replaceWith(t.content);
+}
+function readFields(card) {
+  const f = {}; card.querySelectorAll('[data-f]').forEach(el => f[el.dataset.f] = el.value.trim()); return f;
+}
+function note(p, text, cls) { const s = state.photos[p.key] = state.photos[p.key] || {}; s.note = text; s.noteCls = cls || ''; saveState(); rerenderCard(p); }
+
+$('#cards').addEventListener('input', e => {
+  const card = e.target.closest('.card'); if (!card || !e.target.dataset.f) return;
+  const s = state.photos[card.dataset.key] = state.photos[card.dataset.key] || {};
+  s[e.target.dataset.f] = e.target.value; saveState();
+});
+$('#cards').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-act]'); if (!btn) return;
+  const card = btn.closest('.card'), p = photos.find(x => x.key === card.dataset.key); if (!p) return;
+  const s = state.photos[p.key] = state.photos[p.key] || {};
+  const act = btn.dataset.act;
+  if (act === 'skip' || act === 'unsuitable') {
+    s.decision = s.decision === act ? undefined : act; saveState();
+    if ($('#hideDecided').checked && s.decision) card.remove(); else rerenderCard(p);
+    return;
+  }
+  if (act === 'map') { openMap(p); return; }
+  if (act === 'describe') {
+    if (busy.has(p.key)) return;
+    busy.set(p.key, 'describe'); rerenderCard(p);
+    try { await describeInto(p); } catch (err) { s.note = 'Vision model: ' + err.message; s.noteCls = 'bad'; saveState(); }
+    finally { busy.delete(p.key); rerenderCard(p); }
+    return;
+  }
+  if (act === 'web') {
+    const f = readFields(card);
+    const missing = ['title', 'camera', 'date'].filter(k => !f[k]);
+    if (missing.length) { note(p, 'Fill in: ' + missing.join(', '), 'bad'); return; }
+    const text = [
+      `Title: ${f.title}`,
+      `Description: ${f.description}`,
+      `Subject grid ref: ${f.subject || `none (wide view) — use the square ${spaced(p.loc.square)}`}`,
+      `Camera grid ref: ${f.camera}`,
+      `View direction: ${f.direction === '' ? 'not recorded' : f.direction + '°'}`,
+      `Date taken: ${f.date}`,
+      `Subject tag: ${f.tag}`,
+      `File: ${p.key} in ${folderName}`,
+    ].join('\n');
+    let copied = true;
+    try { await navigator.clipboard.writeText(text); } catch { copied = false; }
+    let saved = null;
+    try { saved = await saveUploadCopy(p, f); } catch (err) { log('Could not save the upload copy: ' + err.message); }
+    try { window.open(GEOGRAPH_FORM, '_blank', 'noopener'); } catch {}
+    Object.assign(s, f); s.webCopied = true; s.uploadName = saved && saved.name;
+    note(p, (saved ? `Saved ${saved.name}${saved.rotated ? ' (turned upright)' : ''} in your “${saved.dir}” folder — choose that file in Geograph's form` +
+                     (f.subject ? ' (Geograph reads the subject grid ref from its name).' : '.')
+                   : `Upload ${p.key} from the photo folder in Geograph's form.`) +
+            (copied ? ' The other details are on the clipboard to paste.' : `\nThe details:\n${text}`) + ' Press “Mark submitted” when done.', copied ? 'ok' : 'bad');
+    return;
+  }
+  if (act === 'marksent') { s.decision = 'sent'; s.sentAt = new Date().toISOString(); s.sentVia = 'website'; s.note = 'Submitted through the website.'; s.noteCls = 'ok'; saveState();
+    if ($('#hideDecided').checked) card.remove(); else rerenderCard(p); return; }
+  if (act === 'submit') {
+    const f = readFields(card);
+    const missing = ['title', 'camera', 'date'].filter(k => !f[k]);
+    if (missing.length) { note(p, 'Fill in: ' + missing.join(', '), 'bad'); return; }
+    const wide = !f.subject;
+    if (wide) f.subject = spaced(p.loc.square);   // Geograph: wide views give only the 4-figure square; the camera position carries the detail
+    if (busy.has(p.key)) return;
+    busy.set(p.key, 'submit'); rerenderCard(p);
+    try {
+      const r = await submit(p, f);
+      Object.assign(s, f); if (wide) s.subject = '';
+      if (r.ok) { s.decision = 'sent'; s.sentAt = new Date().toISOString(); s.sendConfirmed = r.confirmed; }
+      const where = wide ? ` No subject position: filed under square ${p.loc.square}.` : '';
+      note(p, r.ok ? (r.confirmed ? 'Geograph accepted it for moderation.' + where :
+        'Sent. Geograph does not let this page read its reply, so check “Your submissions” on Geograph shortly.' + where) :
+        'Geograph refused it: ' + r.status, r.ok ? 'ok' : 'bad');
+    } catch (err) { s.note = 'Not sent: ' + err.message; s.noteCls = 'bad'; saveState(); }
+    finally { busy.delete(p.key); rerenderCard(p); }
+  }
+});
+async function describeInto(p) {
+  const [vr, or] = await Promise.allSettled([viewContext(p), osmFeatures(p)]);
+  if (vr.status === 'rejected') log(`Geograph search around ${p.loc.cs} failed: ${vr.reason.message}`);
+  if (or.status === 'rejected') log(`${or.reason.message} — writing without map names`);
+  const cands = candidates(p, vr.value, or.value);
+  const r = await describe(p, cands);
+  const s = state.photos[p.key] = state.photos[p.key] || {};
+  // Where is the subject? Geograph files a picture under the subject's square, not the camera's.
+  const n = parseInt(r.same_subject_as, 10), match = n >= 1 && n <= cands.length ? cands[n - 1] : null;
+  const dist = +r.subject_distance_m;
+  let subjLoc = null, how = '';
+  let exact = false;
+  if (match) {
+    subjLoc = locate(match.lat, match.lon); exact = match.src === 'osm' && match.exact;
+    how = match.src === 'osm' ? `at OpenStreetMap's “${match.title}” (${match.kind}, ${Math.round(match.dist)} m ${compass(match.brg)})`
+                              : `from Geograph picture “${match.title}” (${Math.round(match.dist)} m ${compass(match.brg)})`;
+  }
+  if (subjLoc && !s.subjectEdited) {
+    s.subject = spaced(exact ? subjLoc.ref8 : subjLoc.cs); s.subjectHow = how;
+    await setSubjectInfo(p, { grid: subjLoc.grid, e: subjLoc.e, n: subjLoc.n, cs: subjLoc.cs });
+  }
+  s.llm = { suitable: r.suitable !== false, reason: r.reason || '', main_subject: r.main_subject || '', dist: dist > 0 ? Math.round(dist) : null, match: match ? match.title : null };
+  if (!s.title) s.title = r.title || '';
+  if (!s.description) s.description = r.description || '';
+  if (!s.tag && r.subject_tag) s.tag = /^subject:/.test(r.subject_tag) ? r.subject_tag.toLowerCase() : 'subject:' + r.subject_tag.toLowerCase();
+  s.note = r.suitable === false ? `Model thinks this is not suitable: ${r.reason || ''}` :
+    'Draft text written — check it before submitting.' + (s.subjectHow ? ` Subject placed ${s.subjectHow}.` :
+      needsSubject(p) ? ` The model puts the main subject about ${s.llm.dist} m away${p.heading != null ? ' ' + compass(p.heading) : ''}: if it is one feature, set it with “Subject on map”; for a wide view leave the subject blank.` : '');
+  s.noteCls = r.suitable === false ? 'bad' : '';
+  saveState(); rerenderCard(p);
+}
+// The model thinks the subject is well away from the camera, and nobody has placed it yet.
+function needsSubject(p) { const s = state.photos[p.key] || {}; return !!(s.llm && s.llm.dist > 80 && !s.subject && !s.subjectConfirmed); }
+
+let mapObj = null, mapLayer = null, mapSel = null;
+function cellPolygon(loc) {
+  const e0 = Math.floor(loc.e / 100) * 100, n0 = Math.floor(loc.n / 100) * 100, g = loc.grid === 'GB' ? 'BNG' : 'IG';
+  return [[e0, n0], [e0 + 100, n0], [e0 + 100, n0 + 100], [e0, n0 + 100]].map(([e, n]) => { const [lo, la] = proj4(g, 'WGS84', [e, n]); return [la, lo]; });
+}
+function mapSet(lat, lon, digits) {
+  const loc = locate(lat, lon);
+  mapSel.lat = lat; mapSel.lon = lon; mapSel.digits = digits; mapSel.loc = loc;
+  mapSel.pin.setLatLng([lat, lon]);
+  if (mapSel.box) mapSel.box.remove();
+  if (!loc) { $('#mapRef').textContent = 'outside Britain and Ireland'; return; }
+  mapSel.box = L.polygon(cellPolygon(loc), { color: '#a3262a', weight: 2, fill: false }).addTo(mapLayer);
+  const [d] = distBearing(mapSel.p.lat, mapSel.p.lon, lat, lon);
+  $('#mapRef').textContent = `${spaced(digits === 3 ? loc.cs : loc.ref8)} · ${Math.round(d)} m from the camera` + (loc.cs === mapSel.p.loc.cs ? ' · same 100 m square as the camera' : '');
+}
+async function openMap(p) {
+  const s = state.photos[p.key] = state.photos[p.key] || {};
+  $('#mapDlg').showModal();
+  if (!mapObj) {
+    L.Icon.Default.imagePath = 'lib/leaflet/images/';
+    mapObj = L.map('map');
+    const imagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 19, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics' });
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap contributors' });
+    mapObj.attributionControl.addAttribution('Features © OpenStreetMap contributors');
+    imagery.addTo(mapObj); L.control.layers({ 'Aerial': imagery, 'Map (OpenStreetMap)': osm }).addTo(mapObj);
+    mapLayer = L.layerGroup().addTo(mapObj);
+    mapObj.on('click', e => mapSel && mapSet(e.latlng.lat, e.latlng.lng, 4));
+  }
+  mapLayer.clearLayers(); $('#mapPaste').value = '';
+  mapObj.invalidateSize();
+  L.circleMarker([p.lat, p.lon], { radius: 8, color: '#1f5fa8', weight: 3, fillOpacity: 0.2 }).bindTooltip('camera').addTo(mapLayer);
+  if (p.heading != null) L.polyline([[p.lat, p.lon], destination(p.lat, p.lon, p.heading, 2000)], { color: '#1f5fa8', dashArray: '6 6', weight: 2 }).addTo(mapLayer);
+  const pin = L.marker([p.lat, p.lon], { draggable: true }).addTo(mapLayer);
+  pin.on('dragend', () => { const ll = pin.getLatLng(); mapSet(ll.lat, ll.lng, 4); });
+  mapSel = { p, pin };
+  let start = s.subjLatLon;
+  if (!start && s.subjectInfo) { const loc = parseRef(s.subject); if (loc) { const g = loc.grid === 'GB' ? 'BNG' : 'IG'; const [lo, la] = proj4(g, 'WGS84', [loc.e, loc.n]); start = [la, lo]; } }
+  const est = !start && s.llm && s.llm.dist > 80 && p.heading != null ? destination(p.lat, p.lon, p.heading, s.llm.dist) : null;
+  start = start || est || [p.lat, p.lon];
+  mapSet(start[0], start[1], 4);
+  if (est) $('#mapRef').textContent += ` · pin at the model's guess (${s.llm.dist} m ${compass(p.heading)}) — move it to the subject`;
+  mapObj.fitBounds(L.latLngBounds([[p.lat, p.lon], start]).pad(0.5), { maxZoom: 16 });
+  if (Math.abs(start[0] - p.lat) + Math.abs(start[1] - p.lon) < 1e-4) mapObj.setView([p.lat, p.lon], 15);
+  try {
+    const view = await viewContext(p);
+    if (mapSel && mapSel.p === p) for (const x of view.items) {
+      L.circleMarker([x.lat, x.lon], { radius: 6, color: '#2f6b3a', weight: 2, fillColor: '#7bd389', fillOpacity: 0.9 })
+        .bindTooltip(esc(x.title)).on('click', ev => { L.DomEvent.stopPropagation(ev); mapSet(x.lat, x.lon, 3); }).addTo(mapLayer);
+    }
+  } catch (err) { log(`Geograph search around ${p.loc.cs} failed: ${err.message}`); }
+  try {
+    const osm = await osmFeatures(p);
+    if (mapSel && mapSel.p === p) for (const x of osm.items) {
+      L.circleMarker([x.lat, x.lon], { radius: 6, color: '#a85a00', weight: 2, fillColor: '#ffb347', fillOpacity: 0.9 })
+        .bindTooltip(`${esc(x.title)} (${esc(x.kind)})`).on('click', ev => { L.DomEvent.stopPropagation(ev); mapSet(x.lat, x.lon, x.exact ? 4 : 3); }).addTo(mapLayer);
+    }
+  } catch (err) { log(err.message); }
+}
+function mapGo() {
+  const t = $('#mapPaste').value;
+  const ll = parseLatLon(t), g = !ll && parseRef(t);
+  if (ll) { mapSet(ll[0], ll[1], 4); mapObj.setView(ll, Math.max(mapObj.getZoom(), 16)); return; }
+  if (g) { const [lo, la] = proj4(g.grid === 'GB' ? 'BNG' : 'IG', 'WGS84', [g.e, g.n]); mapSet(la, lo, Math.min(4, Math.max(3, (t.replace(/\D/g, '').length) / 2))); mapObj.setView([la, lo], 16); return; }
+  $('#mapRef').textContent = SHORT_LINK.test(t) ? 'Short Google links cannot be read here — right-click the spot in Google Maps and click the coordinates to copy them.'
+                                                 : 'Not recognised — paste a Google Maps link, coordinates or a grid reference.';
+}
+$('#mapGo').addEventListener('click', mapGo);
+$('#mapPaste').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); mapGo(); } });
+$('#mapCancel').addEventListener('click', () => { mapSel = null; $('#mapDlg').close(); });
+$('#mapOk').addEventListener('click', async () => {
+  const sel = mapSel; if (!sel || !sel.loc) return;
+  const p = sel.p, s = state.photos[p.key] = state.photos[p.key] || {};
+  s.subject = spaced(sel.digits === 3 ? sel.loc.cs : sel.loc.ref8); s.subjLatLon = [sel.lat, sel.lon];
+  s.subjectEdited = true; s.subjectConfirmed = true; s.subjectHow = 'on the map';
+  mapSel = null; $('#mapDlg').close();
+  await setSubjectInfo(p, sel.loc);
+  s.note = `Subject set on the map: ${s.subject}.`; s.noteCls = 'ok'; saveState(); rerenderCard(p);
+});
+$('#mapNone').addEventListener('click', async () => {
+  const sel = mapSel; if (!sel) return;
+  const p = sel.p, s = state.photos[p.key] = state.photos[p.key] || {};
+  s.subject = ''; delete s.subjLatLon; s.subjectEdited = true; s.subjectConfirmed = true; s.subjectHow = '';
+  mapSel = null; $('#mapDlg').close();
+  await setSubjectInfo(p, null);
+  s.note = `No subject position: a wide view, filed under square ${p.loc.square} with the camera position.`; s.noteCls = 'ok'; saveState(); rerenderCard(p);
+});
+$('#mapCamera').addEventListener('click', async () => {
+  const sel = mapSel; if (!sel) return;
+  const p = sel.p, s = state.photos[p.key] = state.photos[p.key] || {};
+  s.subject = spaced(p.loc.ref8); delete s.subjLatLon; s.subjectEdited = true; s.subjectConfirmed = true; s.subjectHow = 'at the camera position';
+  mapSel = null; $('#mapDlg').close();
+  await setSubjectInfo(p, null);
+  s.note = 'Subject is at the camera position.'; s.noteCls = 'ok'; saveState(); rerenderCard(p);
+});
+
+async function setSubjectInfo(p, loc) {
+  const s = state.photos[p.key] = state.photos[p.key] || {};
+  if (!loc || !loc.cs || loc.cs === p.loc.cs) { delete s.subjectInfo; saveState(); return; }
+  s.subjectInfo = { cs: loc.cs };
+  if (!densityCache[subjKey(loc.cs)]) {
+    try { densityCache[subjKey(loc.cs)] = await fetchDensity({ loc }); saveDensity(); }
+    catch (err) { log(`Geograph search for subject square ${loc.cs} failed: ${err.message}`); }
+  }
+  saveState();
+}
+$('#cards').addEventListener('change', async e => {
+  if (e.target.dataset.f !== 'subject') return;
+  const card = e.target.closest('.card'), p = photos.find(x => x.key === card.dataset.key); if (!p) return;
+  const s = state.photos[p.key] = state.photos[p.key] || {};
+  if (!e.target.value.trim()) {
+    s.subject = ''; delete s.subjLatLon; s.subjectEdited = true; s.subjectConfirmed = true; s.subjectHow = '';
+    await setSubjectInfo(p, null); s.note = 'No subject position: a wide view, filed under the camera\'s square.'; s.noteCls = ''; saveState(); rerenderCard(p); return;
+  }
+  let loc = parseRef(e.target.value);
+  if (!loc) {
+    const ll = parseLatLon(e.target.value), L2 = ll && locate(ll[0], ll[1]);
+    if (L2) { loc = L2; e.target.value = s.subject = spaced(L2.ref8); s.subjLatLon = ll; }
+  } else delete s.subjLatLon;
+  if (!loc) { note(p, SHORT_LINK.test(e.target.value) ? 'Short Google links cannot be read here — in Google Maps right-click the spot and click the coordinates to copy them, then paste those.'
+                                                        : 'Subject not recognised — use a grid reference (NU 218 359), coordinates (55.6185, -1.6560) or a Google Maps link.', 'bad'); return; }
+  s.subjectEdited = true; s.subjectConfirmed = true; s.subjectHow = 'by you';
+  await setSubjectInfo(p, loc); rerenderCard(p);
+});
+$('#describeAll').addEventListener('click', async e => {
+  const btn = e.target; btn.disabled = true;
+  const list = visible().filter(p => p.loc && !p.flags.length && !(state.photos[p.key] || {}).llm);
+  try {
+    for (let i = 0; i < list.length; i++) {
+      setStatus(`Writing text ${i + 1}/${list.length}…`);
+      const p = list[i]; busy.set(p.key, 'describe'); rerenderCard(p);
+      try { await describeInto(p); }
+      catch (err) { const s = state.photos[p.key] = state.photos[p.key] || {}; s.note = 'Vision model: ' + err.message; s.noteCls = 'bad'; saveState();
+                    if (/Settings|reach/.test(err.message)) break; }
+      finally { busy.delete(p.key); rerenderCard(p); }
+    }
+  } finally { btn.disabled = false; summarise(); }
+});
+
+/* ---------- folder, state file, settings ---------- */
+/* ---------- remembering folders between visits (folder handles kept in IndexedDB) ---------- */
+const idb = {
+  db: null,
+  open() { return this.db || (this.db = new Promise((res, rej) => {
+    const r = indexedDB.open('geograph-coldspots', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); })); },
+  async run(mode, fn) { const db = await this.open(); return new Promise((res, rej) => {
+    const t = db.transaction('kv', mode), req = fn(t.objectStore('kv')); t.oncomplete = () => res(req && req.result); t.onerror = () => rej(t.error); }); },
+  get(k) { return this.run('readonly', st => st.get(k)); },
+  set(k, v) { return this.run('readwrite', st => st.put(v, k)); },
+};
+async function recentFolders() { try { return (await idb.get('recent')) || []; } catch { return []; } }
+async function remember(handle, label) {
+  try {
+    const list = await recentFolders(), keep = [];
+    for (const r of list) if (!(await r.handle.isSameEntry(handle)) && r.label !== label) keep.push(r);
+    await idb.set('recent', [{ label, handle, at: Date.now() }, ...keep].slice(0, 8));
+    showRecent();
+  } catch (err) { log('This browser could not remember the folder: ' + err.message); }
+}
+async function openHandle(handle, label, ask) {
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted' && ask) perm = await handle.requestPermission({ mode: 'read' });
+  if (perm !== 'granted') return false;
+  await loadFolder(() => filesFromHandle(handle), handle.name, handle);
+  return true;
+}
+async function showRecent() {
+  const box = $('#recent'), list = await recentFolders();
+  box.innerHTML = list.length ? 'Reopen: ' + list.map((r, i) => `<button data-recent="${i}" title="${esc(r.handle.name)}">${esc(r.label)}</button>`).join(' ') : '';
+}
+$('#recent').addEventListener('click', async e => {
+  const i = e.target.dataset.recent; if (i == null) return;
+  const r = (await recentFolders())[+i]; if (!r) return;
+  try { if (!(await openHandle(r.handle, r.label, true))) log(`Chrome did not allow reading “${r.label}” — press Reopen again and choose Allow.`); }
+  catch (err) { log(`Could not reopen “${r.label}”: ${err.message} — it may have been moved; use Open photo folder.`); }
+});
+async function reopenLast() {   // on load: reopen the last folder by itself if Chrome still allows it, otherwise offer buttons
+  if (!window.showDirectoryPicker) return;
+  await showRecent();
+  const [last] = await recentFolders();
+  if (last) { try { if (!(await openHandle(last.handle, last.label, false))) setStatus(`Press “${last.label}” next to Reopen to open the last folder again.`); } catch {} }
+}
+reopenLast();
+
+$('#openDir').addEventListener('click', async () => {
+  if (window.showDirectoryPicker) {
+    try { const dir = await showDirectoryPicker({ mode: 'read', id: 'geograph-photos' }); await loadFolder(() => filesFromHandle(dir), dir.name, dir); }
+    catch (err) { if (err.name !== 'AbortError') log('Could not open folder: ' + err.message); }
+  } else $('#dirInput').click();
+});
+$('#dirInput').addEventListener('change', async e => {
+  const list = e.target.files; if (!list.length) return;
+  await loadFolder(() => filesFromInput(list), list[0].webkitRelativePath.split('/')[0]);
+});
+$('#retry').addEventListener('click', () => densityRun());
+$('#filter').addEventListener('change', render);
+$('#device').addEventListener('change', saveView);
+$('#sort').addEventListener('change', saveView);
+$('#find').addEventListener('input', () => { clearTimeout(render.f); render.f = setTimeout(render, 250); });
+$('#hideDecided').addEventListener('change', render);
+$('#saveState').addEventListener('click', async () => {
+  const text = JSON.stringify({ folder: folderName, saved: new Date().toISOString(), state, density: densityCache }, null, 1);
+  if (window.showSaveFilePicker) {
+    try { const h = await showSaveFilePicker({ suggestedName: `geograph-state-${folderName || 'folder'}.json`, types: [{ accept: { 'application/json': ['.json'] } }] });
+          const w = await h.createWritable(); await w.write(text); await w.close(); log('State saved.'); }
+    catch (err) { if (err.name !== 'AbortError') log('Could not save: ' + err.message); }
+  } else { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = `geograph-state-${folderName}.json`; a.click(); }
+});
+$('#loadState').addEventListener('click', () => {
+  const i = document.createElement('input'); i.type = 'file'; i.accept = '.json';
+  i.onchange = async () => {
+    try { const j = JSON.parse(await i.files[0].text()); if (!folderName) { log('Open the photo folder first.'); return; }
+          state = Object.assign({ photos: {} }, j.state);
+          if (state.density) { Object.assign(densityCache, state.density); delete state.density; }
+          if (j.density) Object.assign(densityCache, j.density);
+          saveDensity();
+          saveState(); render(); log(`State loaded (saved ${j.saved}).`); }
+    catch (err) { log('Could not load state: ' + err.message); }
+  };
+  i.click();
+});
+const S_FIELDS = ['vurl', 'vmodel', 'vkey', 'gkey', 'guid', 'gval', 'radius', 'maxerr'];
+$('#openSettings').addEventListener('click', () => { S_FIELDS.forEach(k => $('#s_' + k).value = settings[k] ?? ''); $('#settings').showModal(); });
+$('#settings .presets').addEventListener('click', e => { if (e.target.dataset.url) $('#s_vurl').value = e.target.dataset.url; });
+$('#saveSettings').addEventListener('click', () => {
+  S_FIELDS.forEach(k => settings[k] = $('#s_' + k).value.trim());
+  settings.radius = Math.min(500, Math.max(50, +settings.radius || 75)); settings.maxerr = Math.max(5, +settings.maxerr || 15);
+  store.set('gcs.settings', settings);
+  if (photos.length) render();
+  if (photos.length) { photos.forEach(p => { p.flags = p.flags.filter(x => !/^GPS error/.test(x)); if (p.herr > settings.maxerr && p.loc) p.flags.push(`GPS error ${Math.round(p.herr)} m`); }); render(); densityRun(); }
+});
+// Subject tag suggestions
+(() => { const dl = document.createElement('datalist'); dl.id = 'subjects';
+  dl.innerHTML = (window.GEOGRAPH_SUBJECTS || []).map(t => `<option value="${esc(t)}">`).join(''); document.body.appendChild(dl); })();
+initGrid().catch(err => log('Coordinate grid failed to load: ' + err.message));
+</script>
+</body>
+</html>
