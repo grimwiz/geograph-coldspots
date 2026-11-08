@@ -98,3 +98,10 @@ The page never writes to the photo folder; upload copies go to a separate folder
 
 MIT — see [LICENSE](LICENSE). Bundled third-party components and data are listed in
 [THIRD-PARTY.md](THIRD-PARTY.md) with their own licences.
+
+## Support
+
+If this helps you contribute, please consider [donating to Geograph](https://www.geograph.org.uk/help/donate),
+the volunteer-run charity that hosts and moderates every picture.
+
+If you'd also like to support this tool, you can [make a donation to its author](https://donate.stripe.com/aFa14o8Fv4waa8Td4mbV600).
