@@ -31,7 +31,7 @@ already exist in that 100 m square, and shows you the emptiest first.
   - *Through the website* (always available): copies the details to the clipboard, saves an upload copy named after
     the subject grid reference (Geograph reads the subject from the file name and the camera position from the GPS
     EXIF), turned upright if the phone stored it rotated, and opens Geograph's submission form.
-  - *Directly* via Geograph's JUppy upload interface, once your account qualifies (see below).
+  - *Directly* via Geograph's JUppy upload interface, once your account qualifies (see below) — **untested so far**.
 - Search, device filter (useful when a shared album mixes several people's phones), sorting, and per-folder memory
   of what you have skipped or submitted.
 
@@ -56,7 +56,10 @@ In **Settings**, give an endpoint URL, a model that accepts images (for example 
 - A page opened from disk sends `Origin: null`, so the server must allow it. For Ollama, start it with
   `OLLAMA_ORIGINS=*`; for other servers, allow that origin in their CORS settings.
 
-### Submitting directly
+### Submitting directly (untested)
+
+> **Not yet tested.** The direct upload code has not been tried against Geograph, because the author's account
+> has not yet reached five moderated submissions. Treat it as experimental; the website route is the tested one.
 
 Geograph only allows its JUppy upload interface after your first **five pictures submitted through the website have
 been moderated**. Until then, each card offers **Submit through website**. Afterwards:
