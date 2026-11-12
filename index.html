@@ -607,8 +607,19 @@ function alertless(msg) { setStatus(msg); }
 async function saveUploadCopy(p, f) {
   if (!window.showDirectoryPicker) return null;
   const dir = await uploadDir();
-  const ref = f.subject ? f.subject.replace(/\s+/g, '').toUpperCase() : '';
-  const name = (ref && /^[A-Z]{1,2}\d{4,10}$/.test(ref) ? ref + '_' : '') + p.name.replace(/\.jpeg$/i, '.jpg');
+  // Geograph's form reads the subject from the file name: letters, easting digits, northing digits, separated by "_"
+  // so its pattern matches on the first try (e.g. NU_2179_3584_IMG_9152.jpg).
+  const m = /^([A-Z]{1,2})(\d+)$/.exec(f.subject ? f.subject.replace(/\s+/g, '').toUpperCase() : '');
+  const h = m && m[2].length % 2 === 0 && m[2].length >= 4 ? m[2].length / 2 : 0;
+  const name = (h ? `${m[1]}_${m[2].slice(0, h)}_${m[2].slice(h)}_` : '') + p.name.replace(/\.jpeg$/i, '.jpg');
+  // Keep only the current upload in the folder, so Geograph's file dialog shows one obvious file.
+  // Only files this page saved there are removed (their names are remembered in this browser).
+  const mine = store.get('gcs.uploadCopies', []), kept = [];
+  for (const old of mine) {
+    if (old === name) continue;
+    try { await dir.removeEntry(old); } catch (err) { if (err.name !== 'NotFoundError') kept.push(old); }
+  }
+  store.set('gcs.uploadCopies', [...kept, name]);
   const upright = await uprightCopy(p.file);   // null when the photo has no rotation flag
   const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
   await w.write(upright || p.file); await w.close();   // EXIF (camera position, date, heading) kept either way
@@ -844,7 +855,7 @@ $('#cards').addEventListener('click', async e => {
     try { saved = await saveUploadCopy(p, f); } catch (err) { log('Could not save the upload copy: ' + err.message); }
     try { window.open(GEOGRAPH_FORM, '_blank', 'noopener'); } catch {}
     Object.assign(s, f); s.webCopied = true; s.uploadName = saved && saved.name;
-    note(p, (saved ? `Saved ${saved.name}${saved.rotated ? ' (turned upright)' : ''} in your “${saved.dir}” folder — choose that file in Geograph's form` +
+    note(p, (saved ? `Saved ${saved.name}${saved.rotated ? ' (turned upright)' : ''} — it is now the only photo in your “${saved.dir}” folder; choose it in Geograph's form` +
                      (f.subject ? ' (Geograph reads the subject grid ref from its name).' : '.')
                    : `Upload ${p.key} from the photo folder in Geograph's form.`) +
             (copied ? ' The other details are on the clipboard to paste.' : `\nThe details:\n${text}`) + ' Press “Mark submitted” when done.', copied ? 'ok' : 'bad');

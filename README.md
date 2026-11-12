@@ -25,24 +25,36 @@ already exist in that 100 m square, and shows you the emptiest first.
   the photo as a wide view with no single subject (Geograph then gets only the 4-figure square).
 - **Drafts a title and description** with a vision model of your choice (any Ollama server, or anything that speaks
   OpenAI-style chat completions). The prompt includes the grid reference, heading, nearby Geograph titles and
-  OpenStreetMap names so the model names real places, and it flags photos whose main subject is people, pets, food
-  or an interior. You check and edit everything before it goes anywhere.
+  OpenStreetMap names so the model names real places, plus Geograph's own writing guidance
+  ([`skill.php`](https://www.geograph.org.uk/skill.php?mode=description), fetched live), and it flags photos whose
+  main subject is people, pets, food or an interior. You check and edit everything before it goes anywhere.
+- **Tags the way Geograph does:** geographical contexts chosen from Geograph's live list, an optional subject checked
+  exactly against Geograph's live subject list (suggestions are clicked, never accepted by pressing Enter), and
+  free-form tags. The model proposes contexts and a subject; anything not on Geograph's lists is dropped or flagged.
 - **Submits** in one of two ways:
-  - *Through the website* (always available): copies the details to the clipboard, saves an upload copy named after
+  - **Submit to Geograph**: sends the photo and all its details to Geograph's `api-submit.php` as an ordinary form
+    post in a new tab, using your Geograph login in that browser. Geograph shows its own "Submission Successful" page
+    with the photo's ID, or the reason it refused. The photo is turned upright if needed and sent no larger than the
+    size you choose to release (Settings), with its GPS and date kept.
+  - *Website form instead* (fallback): copies the details to the clipboard, saves an upload copy named after
     the subject grid reference (Geograph reads the subject from the file name and the camera position from the GPS
-    EXIF), turned upright if the phone stored it rotated, and opens Geograph's submission form.
-  - *Directly* via Geograph's JUppy upload interface, once your account qualifies (see below) — **untested so far**.
+    EXIF), turned upright if the phone stored it rotated, and opens Geograph's submission form. The upload folder
+    only ever holds the current upload (the page removes the copies it made earlier), so the file to pick is the
+    only photo there.
 - Search, device filter (useful when a shared album mixes several people's phones), sorting, and per-folder memory
   of what you have skipped or submitted.
 
 ## Getting started
+
+**Use it online:** <https://grimwiz.github.io/geograph-coldspots/> — nothing to download. Or run it from your own copy:
 
 1. Download this repository (green **Code** button → **Download ZIP**) and unzip it. Keep `index.html` and the `lib`
    folder together.
 2. Open `index.html` in **Chrome or Edge**. (Firefox and Safari lack the folder picker; the page falls back to a
    plain folder upload, which works but cannot remember the folder between visits.)
 3. Press **Open photo folder** and choose a folder of photos. The page reads them and starts checking coverage.
-4. Optional: open **Settings** to add a vision model and, later, your Geograph upload details.
+4. Optional: open **Settings** to add a vision model and choose the largest image size to release.
+5. To submit, log in on [geograph.org.uk](https://www.geograph.org.uk/) in the same browser.
 
 No installation, server or build step is needed.
 
@@ -53,25 +65,22 @@ In **Settings**, give an endpoint URL, a model that accepts images (for example 
 
 - A URL ending in `/api/chat` is spoken to as Ollama; anything else as OpenAI-style `/chat/completions`
   (Open WebUI, LiteLLM, hosted services).
-- A page opened from disk sends `Origin: null`, so the server must allow it. For Ollama, start it with
-  `OLLAMA_ORIGINS=*`; for other servers, allow that origin in their CORS settings.
+- The server must allow requests from the page: a copy opened from disk sends `Origin: null`, the online version
+  sends `https://grimwiz.github.io`. For Ollama, start it with `OLLAMA_ORIGINS=*`; for other servers, allow that
+  origin in their CORS settings.
+- The online version is served over https, so the browser only lets it reach a model server over https, or one on
+  `localhost` (Chrome may ask permission to access devices on your local network). A plain-http server elsewhere on
+  your network needs the downloaded copy, or an https address.
 
-### Submitting directly (untested)
+### Submitting
 
-> **Not yet tested.** The direct upload code has not been tried against Geograph, because the author's account
-> has not yet reached five moderated submissions. Treat it as experimental; the website route is the tested one.
+**Submit to Geograph** posts the photo and its details to Geograph in a new tab. It relies on your Geograph login in
+the same browser, so log in first. If the new tab shows Geograph's login page rather than its success page, log in
+there and press **Send again**. Browsers can withhold a site's login from a post that comes from a page opened from
+disk, so this route is new and not yet fully proven; **Website form instead** is the fallback, and works with any
+account.
 
-Geograph only allows its JUppy upload interface after your first **five pictures submitted through the website have
-been moderated**. Until then, each card offers **Submit through website**. Afterwards:
-
-1. Open `https://www.geograph.org.uk/juploader.php?action=login&username=YOUR_NAME&password=YOUR_PASSWORD` once.
-   (This is Geograph's own login design; delete the entry from your browser history afterwards.)
-2. Copy `<user_id>` and `<validation>` from the reply into **Settings**. The cards switch to **Submit to Geograph**.
-
-Limits of this route, from Geograph's published source code — the live site may differ: only the standard image size
-is kept, there is no field for geographical context, and because Geograph sends no CORS headers on that endpoint the
-page cannot read the reply. Check "Your submissions" on Geograph after sending. The website route has none of these
-limits.
+After a submission, press **Mark submitted** on the card so it drops out of the list.
 
 ## What leaves your computer
 
@@ -80,9 +89,13 @@ limits.
 - **OpenStreetMap Overpass** (`overpass-api.de`): the camera position, to list named features within 1.5 km.
 - **Your vision model**: a 1024 px copy of the photo plus the prompt, only when you press *Write text*.
 - **Map tiles** (Esri aerial imagery; OpenStreetMap as an option): the map area you look at.
-- **Geograph upload**: the photo and its details, only when you press Submit.
+- **Geograph submission**: the photo and its details, only when you press Submit.
+- **Geograph's lists and guidance**: the context and subject lists and the writing guidance are downloaded (no data
+  about you is sent) and cached in the browser.
 
 Settings, decisions and drafted text stay in your browser's storage. *Save state…* writes them to a file you choose.
+The online version and a copy opened from disk keep separate storage; use *Save state…* / *Load state…* to move
+between them.
 The page never writes to the photo folder; upload copies go to a separate folder you pick once.
 
 ## Notes and limits
